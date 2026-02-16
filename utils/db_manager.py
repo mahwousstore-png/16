@@ -1,77 +1,161 @@
 """
-db_manager.py - قاعدة بيانات SQLite خفيفة v16.0
+db_manager.py - إدارة قاعدة البيانات v17.0
+- SQLite خفيف
+- تتبع أحداث شامل بالوقت
+- حفظ القرارات والتاريخ
 """
-import sqlite3, pandas as pd, json
+import sqlite3, json, os
 from datetime import datetime
-from config import DB_PATH
+
+DB_PATH = "pricing_v17.db"
 
 
-class DatabaseManager:
-    def __init__(self, path=None):
-        self.path = path or DB_PATH
-        self._init_db()
+def get_db():
+    """الحصول على اتصال قاعدة البيانات"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    def _conn(self):
-        return sqlite3.connect(self.path)
 
-    def _init_db(self):
-        with self._conn() as c:
-            c.execute("""CREATE TABLE IF NOT EXISTS results(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product TEXT, our_price REAL, comp_name TEXT, comp_price REAL,
-                diff REAL, match_score REAL, decision TEXT, competitor TEXT,
-                brand TEXT, size REAL, risk TEXT, reasoning TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS audit_log(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT, details TEXT, page TEXT,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS settings(
-                key TEXT PRIMARY KEY, value TEXT)""")
+def init_db():
+    """تهيئة قاعدة البيانات"""
+    conn = get_db()
+    c = conn.cursor()
 
-    def save_results(self, df):
-        col_map = {
-            "المنتج":"product","السعر":"our_price","اسم المنافس":"comp_name",
-            "أقل سعر منافس":"comp_price","الفرق":"diff","نسبة التطابق":"match_score",
-            "القرار":"decision","المنافس":"competitor","الماركة":"brand",
-            "الحجم":"size","الخطورة":"risk","التفسير":"reasoning",
-        }
-        with self._conn() as c:
-            for _, row in df.iterrows():
-                vals = {en: row.get(ar, "") for ar, en in col_map.items()}
-                cols = ",".join(vals.keys())
-                phs = ",".join(["?" for _ in vals])
-                c.execute(f"INSERT INTO results({cols}) VALUES({phs})", list(vals.values()))
+    c.execute("""CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        page TEXT,
+        event_type TEXT NOT NULL,
+        details TEXT,
+        product_name TEXT,
+        action_taken TEXT
+    )""")
 
-    def get_all_results(self, limit=500):
-        with self._conn() as c:
-            return pd.read_sql(f"SELECT * FROM results ORDER BY id DESC LIMIT {limit}", c)
+    c.execute("""CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        product_name TEXT NOT NULL,
+        old_status TEXT,
+        new_status TEXT,
+        reason TEXT,
+        decided_by TEXT DEFAULT 'user'
+    )""")
 
-    def get_statistics(self):
-        with self._conn() as c:
-            cur = c.execute("SELECT COUNT(*), AVG(diff), AVG(match_score) FROM results")
-            r = cur.fetchone()
-            return {"total": r[0] or 0, "avg_price_diff": r[1] or 0, "avg_match_score": r[2] or 0}
+    c.execute("""CREATE TABLE IF NOT EXISTS ai_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        prompt_hash TEXT UNIQUE,
+        response TEXT,
+        source TEXT
+    )""")
 
-    def clear_results(self):
-        with self._conn() as c:
-            c.execute("DELETE FROM results")
+    c.execute("""CREATE TABLE IF NOT EXISTS analysis_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        our_file TEXT,
+        comp_file TEXT,
+        total_products INTEGER,
+        matched INTEGER,
+        missing INTEGER,
+        summary TEXT
+    )""")
 
-    def log_action(self, action, details="", page=""):
-        with self._conn() as c:
-            c.execute("INSERT INTO audit_log(action,details,page,timestamp) VALUES(?,?,?,?)",
-                      (action, details, page, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
 
-    def get_audit_log(self, limit=50):
-        with self._conn() as c:
-            return pd.read_sql(f"SELECT * FROM audit_log ORDER BY id DESC LIMIT {limit}", c)
 
-    def save_setting(self, key, value):
-        with self._conn() as c:
-            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
+def log_event(page, event_type, details="", product_name="", action=""):
+    """تسجيل حدث"""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO events (timestamp, page, event_type, details, product_name, action_taken) VALUES (?,?,?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), page, event_type, details, product_name, action)
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
 
-    def get_setting(self, key, default=""):
-        with self._conn() as c:
-            cur = c.execute("SELECT value FROM settings WHERE key=?", (key,))
-            r = cur.fetchone()
-            return r[0] if r else default
+
+def log_decision(product_name, old_status, new_status, reason="", decided_by="user"):
+    """تسجيل قرار"""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO decisions (timestamp, product_name, old_status, new_status, reason, decided_by) VALUES (?,?,?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), product_name, old_status, new_status, reason, decided_by)
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+
+def log_analysis(our_file, comp_file, total, matched, missing, summary=""):
+    """تسجيل تحليل"""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO analysis_history (timestamp, our_file, comp_file, total_products, matched, missing, summary) VALUES (?,?,?,?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), our_file, comp_file, total, matched, missing, summary)
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+
+def get_events(page=None, limit=50):
+    """جلب الأحداث"""
+    try:
+        conn = get_db()
+        if page:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE page=? ORDER BY id DESC LIMIT ?", (page, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except:
+        return []
+
+
+def get_decisions(product_name=None, limit=50):
+    """جلب القرارات"""
+    try:
+        conn = get_db()
+        if product_name:
+            rows = conn.execute(
+                "SELECT * FROM decisions WHERE product_name LIKE ? ORDER BY id DESC LIMIT ?",
+                (f"%{product_name}%", limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except:
+        return []
+
+
+def get_analysis_history(limit=10):
+    """جلب تاريخ التحليلات"""
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM analysis_history ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except:
+        return []
+
+
+# تهيئة تلقائية
+init_db()
