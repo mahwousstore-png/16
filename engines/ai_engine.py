@@ -1,22 +1,21 @@
 """
-ai_engine.py - محرك الذكاء الصناعي v17.0
-- يعمل فعلياً مع Gemini API مباشرة
-- OpenRouter كـ fallback
+ai_engine.py - محرك الذكاء الصناعي v17.1
+- مفاتيح متعددة مع fallback تلقائي
+- Gemini أولاً ثم OpenRouter
 - تدريب مخصص لكل صفحة
-- تحقق من المنتجات والأسعار
 """
 import requests, json, time
-from config import GEMINI_API_KEY, OPENROUTER_API_KEY
+from config import GEMINI_API_KEYS, OPENROUTER_API_KEY
 
-# ===== Gemini API مباشر =====
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-
-# ===== OpenRouter API =====
+# ===== النماذج =====
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "google/gemini-2.0-flash-001"
 
 # ===== System Prompts لكل صفحة =====
 PAGE_PROMPTS = {
-    "price_raise": """أنت خبير تسعير عطور. مهمتك تحليل المنتجات التي سعرها أعلى من المنافسين.
+    "price_raise": """أنت خبير تسعير عطور في السوق السعودي. مهمتك تحليل المنتجات التي سعرها أعلى من المنافسين.
 لكل منتج: تحقق هل المطابقة صحيحة (نفس المنتج والحجم والماركة)، هل فرق السعر مبرر، وأعطِ توصية (خفض/إبقاء/مراجعة).
 أجب بالعربية بشكل مختصر ومفيد.""",
 
@@ -44,7 +43,7 @@ PAGE_PROMPTS = {
 1. التحقق أن المنتجين متطابقين فعلاً (نفس الماركة، الاسم، الحجم، النوع)
 2. التحقق من السعر المعقول في السوق
 3. إعطاء نسبة ثقة (0-100%)
-أجب بـ JSON: {"match": true/false, "confidence": 0-100, "reason": "السبب", "suggestion": "التوصية"}""",
+أجب بـ JSON فقط: {"match": true/false, "confidence": 0-100, "reason": "السبب", "suggestion": "التوصية"}""",
 
     "paste": """أنت مساعد ذكي. المستخدم سيلصق بيانات أو أوامر. حللها ونفذ المطلوب.
 إذا كانت قائمة منتجات: صنفها وأعطِ توصيات.
@@ -54,60 +53,60 @@ PAGE_PROMPTS = {
 
 
 def _call_gemini(prompt, system_prompt=""):
-    """استدعاء Gemini API مباشرة"""
-    try:
-        full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-        payload = {
-            "contents": [{"parts": [{"text": full_prompt}]}],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 2048,
-                "topP": 0.8
-            }
-        }
-        resp = requests.post(GEMINI_URL, json=payload, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "candidates" in data and data["candidates"]:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-        return None
-    except Exception as e:
-        return None
+    """استدعاء Gemini API مع تجربة جميع المفاتيح"""
+    full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048, "topP": 0.8}
+    }
+    for key in GEMINI_API_KEYS:
+        if not key:
+            continue
+        try:
+            url = f"{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={key}"
+            resp = requests.post(url, json=payload, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "candidates" in data and data["candidates"]:
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    return text
+            # إذا 429 (حصة منتهية) جرب المفتاح التالي
+            elif resp.status_code == 429:
+                continue
+            # إذا خطأ آخر جرب التالي
+            else:
+                continue
+        except:
+            continue
+    return None
 
 
 def _call_openrouter(prompt, system_prompt=""):
     """استدعاء OpenRouter كـ fallback"""
+    if not OPENROUTER_API_KEY:
+        return None
     try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": "google/gemini-2.0-flash-exp:free",
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 2048
-        }
+        payload = {"model": OPENROUTER_MODEL, "messages": messages, "temperature": 0.3, "max_tokens": 2048}
         resp = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             if "choices" in data and data["choices"]:
                 return data["choices"][0]["message"]["content"]
         return None
-    except Exception as e:
+    except:
         return None
 
 
 def call_ai(prompt, page="general"):
-    """استدعاء AI مع fallback تلقائي"""
+    """استدعاء AI مع fallback تلقائي بين جميع المزودين"""
     system_prompt = PAGE_PROMPTS.get(page, PAGE_PROMPTS["general"])
 
-    # محاولة 1: Gemini مباشر
+    # محاولة 1: Gemini مباشر (يجرب جميع المفاتيح)
     result = _call_gemini(prompt, system_prompt)
     if result:
         return {"success": True, "response": result, "source": "Gemini"}
@@ -117,7 +116,7 @@ def call_ai(prompt, page="general"):
     if result:
         return {"success": True, "response": result, "source": "OpenRouter"}
 
-    return {"success": False, "response": "فشل الاتصال بجميع مزودي AI. تحقق من المفاتيح.", "source": "none"}
+    return {"success": False, "response": "فشل الاتصال بجميع مزودي AI. تحقق من المفاتيح أو الحصة.", "source": "none"}
 
 
 def chat_with_ai(message, history=None, page="general"):
@@ -141,7 +140,6 @@ def verify_match(our_product, comp_product, our_price=0, comp_price=0):
     if result["success"]:
         try:
             text = result["response"]
-            # استخراج JSON من النص
             start = text.find('{')
             end = text.rfind('}') + 1
             if start >= 0 and end > start:
@@ -150,7 +148,7 @@ def verify_match(our_product, comp_product, our_price=0, comp_price=0):
         except:
             pass
         return {"success": True, "match": None, "confidence": 0,
-                "reason": result["response"], "source": result["source"]}
+                "reason": result["response"][:300], "source": result["source"]}
     return {"success": False, "match": None, "confidence": 0, "reason": "فشل الاتصال"}
 
 
@@ -169,11 +167,9 @@ def bulk_verify(products_list, page="review"):
     """تحقق جماعي من قائمة منتجات"""
     if not products_list:
         return {"success": False, "response": "لا توجد منتجات"}
-
     items = []
     for i, p in enumerate(products_list[:20]):
         items.append(f"{i+1}. منتجنا: {p.get('our', '')} ({p.get('our_price', 0)} ر.س) ↔ المنافس: {p.get('comp', '')} ({p.get('comp_price', 0)} ر.س)")
-
     prompt = f"""تحقق من هذه المطابقات وأعطِ توصية لكل واحدة:
 {chr(10).join(items)}
 
@@ -197,7 +193,7 @@ def process_paste(text, page="general"):
     """معالجة نص ملصوق من المستخدم"""
     prompt = f"""المستخدم لصق هذا النص في صفحة '{page}':
 ---
-{text}
+{text[:3000]}
 ---
 حلل المحتوى وأعطِ النتائج والتوصيات المناسبة."""
     return call_ai(prompt, "paste")
