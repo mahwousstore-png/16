@@ -1,9 +1,7 @@
 """
-config.py - الإعدادات المركزية v16.0
+config.py - الإعدادات المركزية v17.0
 """
-import os, json
-
-APP_VERSION = "16.0"
+APP_VERSION = "17.0"
 APP_NAME = "نظام التسعير الذكي - مهووس"
 APP_ICON = "🧪"
 
@@ -15,7 +13,7 @@ OPENROUTER_API_KEY = "sk-or-v1-a44fa4475256d17488113f6ed01cb29da466a5c2b0c924be3
 WEBHOOK_UPDATE_PRICES = "https://hook.eu2.make.com/99oljy0d6r3chwg6bdfsptcf6bk8htsd"
 WEBHOOK_NEW_PRODUCTS = "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm"
 
-# ===== ألوان النظام =====
+# ===== ألوان =====
 COLORS = {
     "raise": "#dc3545", "lower": "#ffc107", "approved": "#28a745",
     "missing": "#007bff", "review": "#ff9800", "primary": "#6C63FF",
@@ -32,8 +30,6 @@ REJECT_KEYWORDS = [
     "sample", "عينة", "عينه", "decant", "تقسيم", "تقسيمة",
     "split", "miniature", "0.5ml", "1ml", "2ml", "3ml",
 ]
-
-# ===== تصنيف المنتجات =====
 TESTER_KEYWORDS = ["tester", "تستر", "تيستر"]
 SET_KEYWORDS = ["set", "gift set", "طقم", "مجموعة", "coffret"]
 
@@ -58,7 +54,20 @@ WORD_REPLACEMENTS = {
     'مل':'ml','ملي':'ml','سوفاج':'sauvage','ديور':'dior','شانيل':'chanel',
 }
 
+APP_TITLE = APP_NAME
 PAGES_PER_TABLE = 25
+MIN_MATCH_SCORE = MATCH_THRESHOLD
+HIGH_MATCH_SCORE = HIGH_CONFIDENCE
+PRICE_DIFF_THRESHOLD = PRICE_TOLERANCE
+
+SECTIONS = [
+    "📊 لوحة التحكم", "📂 رفع الملفات",
+    "🔴 سعر أعلى", "🟢 سعر أقل",
+    "✅ موافق عليها", "🔍 منتجات مفقودة",
+    "⚠️ تحت المراجعة", "📊 مقارنة بصرية",
+    "🤖 الذكاء الصناعي", "⚡ أتمتة Make",
+    "⚙️ الإعدادات", "📜 السجل",
+]
 
 SIDEBAR_SECTIONS = [
     ("🏠","لوحة القيادة"), ("📤","رفع الملفات"),
