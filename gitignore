@@ -1,0 +1,5 @@
+# حماية المفاتيح
+.streamlit/secrets.toml
+*.db
+__pycache__/
+*.pyc
