@@ -1,17 +1,35 @@
 """
-config.py - الإعدادات المركزية v17.0
+config.py - الإعدادات المركزية v17.1
+المفاتيح محمية عبر Streamlit Secrets (لا تظهر في الكود)
 """
-APP_VERSION = "17.0"
-APP_NAME = "نظام التسعير الذكي - مهووس"
+import streamlit as st
+
+# ===== معلومات التطبيق =====
+APP_TITLE = "نظام التسعير الذكي - مهووس"
+APP_NAME = APP_TITLE
+APP_VERSION = "v17.1"
 APP_ICON = "🧪"
 
-# ===== مفاتيح AI =====
-GEMINI_API_KEY = "AIzaSyCM_7dJ-0mq4H81CHBYAIA1MkDbj8lk7Ko"
-OPENROUTER_API_KEY = "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"
+# ===== مفاتيح AI (محمية عبر st.secrets) =====
+def _get_secret(key, default=""):
+    try:
+        return st.secrets.get(key, default)
+    except:
+        return default
 
-# ===== Make.com Webhooks =====
-WEBHOOK_UPDATE_PRICES = "https://hook.eu2.make.com/99oljy0d6r3chwg6bdfsptcf6bk8htsd"
-WEBHOOK_NEW_PRODUCTS = "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm"
+GEMINI_API_KEYS = [
+    _get_secret("GEMINI_KEY_1"),
+    _get_secret("GEMINI_KEY_2"),
+    _get_secret("GEMINI_KEY_3"),
+]
+GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k]
+GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
+OPENROUTER_API_KEY = _get_secret("OPENROUTER_KEY")
+EXTRA_API_KEY = _get_secret("EXTRA_API_KEY")
+
+# ===== Make.com Webhooks (محمية أيضاً) =====
+WEBHOOK_UPDATE_PRICES = _get_secret("WEBHOOK_UPDATE_PRICES", "https://hook.eu2.make.com/99oljy0d6r3chwg6bdfsptcf6bk8htsd")
+WEBHOOK_NEW_PRODUCTS = _get_secret("WEBHOOK_NEW_PRODUCTS", "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm")
 
 # ===== ألوان =====
 COLORS = {
@@ -24,8 +42,11 @@ MATCH_THRESHOLD = 60
 HIGH_CONFIDENCE = 95
 REVIEW_THRESHOLD = 85
 PRICE_TOLERANCE = 5
+MIN_MATCH_SCORE = MATCH_THRESHOLD
+HIGH_MATCH_SCORE = HIGH_CONFIDENCE
+PRICE_DIFF_THRESHOLD = PRICE_TOLERANCE
 
-# ===== المنتجات المستثناة: العينات فقط =====
+# ===== استثناء العينات فقط =====
 REJECT_KEYWORDS = [
     "sample", "عينة", "عينه", "decant", "تقسيم", "تقسيمة",
     "split", "miniature", "0.5ml", "1ml", "2ml", "3ml",
@@ -54,12 +75,7 @@ WORD_REPLACEMENTS = {
     'مل':'ml','ملي':'ml','سوفاج':'sauvage','ديور':'dior','شانيل':'chanel',
 }
 
-APP_TITLE = APP_NAME
-PAGES_PER_TABLE = 25
-MIN_MATCH_SCORE = MATCH_THRESHOLD
-HIGH_MATCH_SCORE = HIGH_CONFIDENCE
-PRICE_DIFF_THRESHOLD = PRICE_TOLERANCE
-
+# ===== الأقسام =====
 SECTIONS = [
     "📊 لوحة التحكم", "📂 رفع الملفات",
     "🔴 سعر أعلى", "🟢 سعر أقل",
@@ -68,14 +84,7 @@ SECTIONS = [
     "🤖 الذكاء الصناعي", "⚡ أتمتة Make",
     "⚙️ الإعدادات", "📜 السجل",
 ]
+SIDEBAR_SECTIONS = SECTIONS
 
-SIDEBAR_SECTIONS = [
-    ("🏠","لوحة القيادة"), ("📤","رفع الملفات"),
-    ("🔴","رفع سعر"), ("🟡","خفض سعر"),
-    ("🟢","موافق عليها"), ("🔵","منتجات مفقودة"),
-    ("⚠️","يحتاج مراجعة"), ("🤖","تحقق AI"),
-    ("💬","دردشة AI"), ("⚡","Make أتمتة"),
-    ("💾","قاعدة البيانات"), ("⚙️","الإعدادات"),
-]
-
+PAGES_PER_TABLE = 25
 DB_PATH = "perfume_pricing.db"
