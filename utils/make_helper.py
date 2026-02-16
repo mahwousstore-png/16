@@ -1,185 +1,127 @@
 """
-make_helper.py - أتمتة Make.com (نسخة أصلية مع التوافق)
-الدوال الأصلية من v15 + دوال التوافق مع v16
+make_helper.py - أتمتة Make.com v17.0
+- Webhooks أصلية مربوطة مباشرة
+- دوال تصدير لكل قسم
 """
-import requests, json, hashlib
-
-# ===== Webhooks الأصلية =====
-WEBHOOK_UPDATE_PRICES = "https://hook.eu2.make.com/99oljy0d6r3chwg6bdfsptcf6bk8htsd"
-WEBHOOK_NEW_PRODUCTS = "https://hook.eu2.make.com/xvubj23dmpxu8qzilstd25cnumrwtdxm"
+import requests, json, time
+from datetime import datetime
+from config import WEBHOOK_UPDATE_PRICES, WEBHOOK_NEW_PRODUCTS
 
 
-# ══════════════════════════════════════════════════════════════
-# دوال أصلية من v15
-# ══════════════════════════════════════════════════════════════
-
-def _extract_brand(name):
-    """استخراج الماركة من اسم المنتج"""
-    from config import KNOWN_BRANDS
-    name_lower = name.lower()
-    for brand in KNOWN_BRANDS:
-        if brand.lower() in name_lower:
-            return brand
-    return "عام"
-
-
-def _extract_category(name, product_type):
-    """تحديد التصنيف بناءً على النوع"""
-    type_lower = str(product_type).lower()
-    if "رجال" in type_lower or "men" in type_lower:
-        return "عطور رجالية"
-    elif "نسائ" in type_lower or "women" in type_lower:
-        return "عطور نسائية"
-    elif "unisex" in type_lower or "مشترك" in type_lower:
-        return "عطور مشتركة"
-    return "عطور"
-
-
-def send_to_webhook(webhook_url, payload):
-    """إرسال البيانات إلى Webhook"""
+def send_price_updates(products, webhook_url=None):
+    """إرسال تحديثات الأسعار إلى Make.com"""
+    url = webhook_url or WEBHOOK_UPDATE_PRICES
     try:
-        response = requests.post(webhook_url, json=payload, timeout=30)
-        if response.status_code == 200:
-            return {"success": True, "message": "تم الإرسال بنجاح"}
-        return {"success": False, "error": f"HTTP {response.status_code}"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def verify_webhook_connection(webhook_url, test_type="update"):
-    """التحقق من اتصال Webhook - أصلي"""
-    try:
-        # Make.com webhooks ترد 200 على GET مع رسالة "Accepted"
-        response = requests.get(webhook_url, timeout=15)
-        if response.status_code == 200:
-            return {"connected": True, "message": "متصل ويعمل", "status_code": 200}
-        return {"connected": False, "message": f"HTTP {response.status_code}", "status_code": response.status_code}
-    except Exception as e:
-        return {"connected": False, "message": str(e)}
-
-
-def send_price_updates_original(products):
-    """إرسال تحديثات الأسعار إلى Make.com - أصلي من v15"""
-    payload = {"data": []}
-    for p in products:
-        sku = p.get("sku", p.get("رمز المنتج", ""))
-        price_raw = p.get("السعر الجديد", p.get("new_price", p.get("السعر", 0)))
-        try:
-            price = int(float(str(price_raw).replace(',', '')))
-        except:
-            price = 0
-        if price <= 0:
-            price = 1
-
-        item = {
-            "رمز المنتج sku": sku,
-            "سعر المنتج": price,
+        payload = {
+            "type": "price_updates",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(products),
+            "products": products
         }
-        payload["data"].append(item)
-
-    return send_to_webhook(WEBHOOK_UPDATE_PRICES, payload)
-
-
-def send_new_products_original(products):
-    """إرسال منتجات جديدة إلى Make.com - أصلي من v15"""
-    # تنسيق يتوافق مع Make.com blueprint:
-    # Iterator يستخدم {{1.data}} وSalla CreateProduct يستخدم أسماء عربية
-    payload = {"data": []}
-    for p in products:
-        name = p.get("المنتج", p.get("name", ""))
-        price_raw = p.get("السعر", p.get("price", p.get("أقل سعر منافس", 0)))
-        try:
-            price = int(float(str(price_raw).replace(',', '')))
-        except:
-            price = 0
-        if price <= 0:
-            price = 1  # سلة لا تقبل سعر 0
-
-        # توليد SKU تلقائي إذا كان فارغاً
-        sku = p.get("sku", p.get("رمز المنتج", ""))
-        if not sku:
-            sku = f"PERF-{hashlib.md5(name.encode()).hexdigest()[:8].upper()}"
-
-        # استخراج الماركة تلقائياً إذا كانت فارغة
-        brand = p.get("الماركة", p.get("brand", ""))
-        if not brand:
-            brand = _extract_brand(name)
-
-        # تصنيف افتراضي إذا كان فارغاً - يستخدم 88 تصنيف من سلة
-        category = p.get("التصنيف", p.get("category", ""))
-        if not category:
-            p_type = p.get("النوع", p.get("type", ""))
-            category = _extract_category(name, str(p_type))
-
-        # بناء الوصف
-        desc = p.get("الوصف", p.get("description", ""))
-        if not desc:
-            desc = f"{name} - {p.get('النوع', p.get('type', ''))} - {p.get('الحجم', p.get('size', ''))}"
-
-        # بناء البيانات بتنسيق يتوافق مع Salla API عبر Make.com
-        # الحقول المدعومة في blueprint: أسم المنتج, سعر المنتج, رمز المنتج sku, الوزن, سعر التكلفة, السعر المخفض, الوصف
-        # ملاحظة: categories و brand_id يحتاجان ID رقمي من سلة وليس اسم نصي
-        item = {
-            "أسم المنتج": name,
-            "سعر المنتج": price,
-            "رمز المنتج sku": sku,
-            "الوزن": 1,
-            "الوصف": desc,
+        resp = requests.post(url, json=payload, timeout=15)
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "message": f"تم إرسال {len(products)} منتج بنجاح" if resp.status_code == 200 else f"خطأ: {resp.status_code}"
         }
-
-        # لا نرسل سعر التكلفة والسعر المخفض إذا كانا 0 لتجنب أخطاء سلة
-        cost = p.get("سعر التكلفة", p.get("cost_price", 0))
-        if cost and int(float(str(cost))) > 0:
-            item["سعر التكلفة"] = int(float(str(cost)))
-
-        sale = p.get("السعر المخفض", p.get("sale_price", 0))
-        if sale and int(float(str(sale))) > 0:
-            item["السعر المخفض"] = int(float(str(sale)))
-
-        payload["data"].append(item)
-
-    return send_to_webhook(WEBHOOK_NEW_PRODUCTS, payload)
-
-
-# ══════════════════════════════════════════════════════════════
-# دوال التوافق مع app.py v16 (تستدعي الدوال الأصلية)
-# ══════════════════════════════════════════════════════════════
-
-def send_to_make(webhook_url, data):
-    """متوافق مع v16 - إرسال عام"""
-    try:
-        r = requests.post(webhook_url, json=data, timeout=15)
-        return {"success": r.status_code == 200, "message": f"تم الإرسال ({r.status_code})"}
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {"success": False, "status_code": 0, "message": f"خطأ: {str(e)}"}
 
 
-def send_price_updates(webhook_url, df):
-    """متوافق مع v16 - يقبل webhook_url و DataFrame"""
-    if hasattr(df, 'empty') and df.empty:
-        return {"success": False, "message": "لا توجد بيانات"}
-    if hasattr(df, 'to_dict'):
-        records = df.head(50).to_dict('records')
-    else:
-        records = df if isinstance(df, list) else []
-    return send_to_make(webhook_url, {"type": "price_update", "products": records, "count": len(records)})
-
-
-def send_missing_products(webhook_url, df):
-    """متوافق مع v16 - إرسال منتجات مفقودة"""
-    if hasattr(df, 'empty') and df.empty:
-        return {"success": False, "message": "لا توجد بيانات"}
-    if hasattr(df, 'to_dict'):
-        records = df.head(50).to_dict('records')
-    else:
-        records = df if isinstance(df, list) else []
-    return send_to_make(webhook_url, {"type": "missing_products", "products": records, "count": len(records)})
-
-
-def test_webhook(webhook_url):
-    """متوافق مع v16 - اختبار Webhook"""
+def send_new_products(products, webhook_url=None):
+    """إرسال منتجات جديدة/مفقودة إلى Make.com"""
+    url = webhook_url or WEBHOOK_NEW_PRODUCTS
     try:
-        r = requests.post(webhook_url, json={"test": True, "source": "mahwous-erp-v16"}, timeout=10)
-        return r.status_code == 200
-    except:
-        return False
+        payload = {
+            "type": "new_products",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(products),
+            "products": products
+        }
+        resp = requests.post(url, json=payload, timeout=15)
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "message": f"تم إرسال {len(products)} منتج جديد بنجاح" if resp.status_code == 200 else f"خطأ: {resp.status_code}"
+        }
+    except Exception as e:
+        return {"success": False, "status_code": 0, "message": f"خطأ: {str(e)}"}
+
+
+def send_missing_products(products, webhook_url=None):
+    """إرسال المنتجات المفقودة إلى Make.com"""
+    url = webhook_url or WEBHOOK_NEW_PRODUCTS
+    try:
+        payload = {
+            "type": "missing_products",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(products),
+            "products": products
+        }
+        resp = requests.post(url, json=payload, timeout=15)
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "message": f"تم إرسال {len(products)} منتج مفقود بنجاح" if resp.status_code == 200 else f"خطأ: {resp.status_code}"
+        }
+    except Exception as e:
+        return {"success": False, "status_code": 0, "message": f"خطأ: {str(e)}"}
+
+
+def send_to_make(data, webhook_type="update"):
+    """دالة عامة للإرسال إلى Make"""
+    if webhook_type == "update":
+        return send_price_updates(data)
+    elif webhook_type in ["new", "missing"]:
+        return send_new_products(data)
+    return {"success": False, "message": "نوع غير معروف"}
+
+
+def send_single_product(product, action="update"):
+    """إرسال منتج واحد إلى Make"""
+    return send_to_make([product], action)
+
+
+def test_webhook(webhook_type="update"):
+    """اختبار اتصال Webhook"""
+    url = WEBHOOK_UPDATE_PRICES if webhook_type == "update" else WEBHOOK_NEW_PRODUCTS
+    try:
+        payload = {"type": "test", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        resp = requests.post(url, json=payload, timeout=10)
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "url": url,
+            "message": "الاتصال ناجح ✅" if resp.status_code == 200 else f"فشل الاتصال: {resp.status_code}"
+        }
+    except Exception as e:
+        return {"success": False, "url": url, "message": f"خطأ: {str(e)}"}
+
+
+def verify_webhook_connection():
+    """التحقق من جميع الاتصالات"""
+    results = {
+        "update_prices": test_webhook("update"),
+        "new_products": test_webhook("new")
+    }
+    results["all_connected"] = all(r["success"] for r in results.values())
+    return results
+
+
+def export_to_make_format(df, section_type="update"):
+    """تحويل DataFrame إلى صيغة Make"""
+    products = []
+    for _, row in df.iterrows():
+        product = {
+            "name": str(row.get("المنتج", "")),
+            "our_price": float(row.get("السعر", 0)),
+            "comp_name": str(row.get("اسم المنافس", "")),
+            "comp_price": float(row.get("أقل سعر منافس", 0)),
+            "diff": float(row.get("الفرق", 0)),
+            "match_score": float(row.get("نسبة التطابق", 0)),
+            "decision": str(row.get("القرار", "")),
+            "brand": str(row.get("الماركة", "")),
+            "competitor": str(row.get("المنافس", ""))
+        }
+        products.append(product)
+    return products
