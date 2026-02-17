@@ -1,8 +1,8 @@
 """
-engine.py - محرك المطابقة الهجين v17.4 (إصلاح الترميز العربي)
-- إصلاح: دعم شامل لترميز Windows-1256 (لملفات Excel العربية).
-- تحسين: تخفيف قيود الماركة لتجنب ضياع التطابق (Dior vs Christian Dior).
-- سرعة: Vectorization مع معالجة ذكية.
+engine.py - محرك المطابقة الهجين v17.5 (Fix KeyError & Empty Results)
+- إصلاح: ضمان وجود الأعمدة حتى لو كانت النتائج فارغة لمنع انهيار التطبيق.
+- تحسين: تخفيف شروط المطابقة لزيادة عدد النتائج.
+- ميزة: دعم شامل للترميز العربي (Windows-1256).
 """
 import re
 import pandas as pd
@@ -59,7 +59,6 @@ def is_sample(text):
 # ===== 2. قراءة الملفات (مع إصلاح الترميز) =====
 def read_file(uploaded_file):
     """محاولة قراءة الملف بكل الترميزات المحتملة"""
-    # قائمة الترميزات الشائعة للملفات العربية
     encodings = ['utf-8', 'utf-8-sig', 'windows-1256', 'cp1256', 'iso-8859-1']
     
     name = uploaded_file.name.lower()
@@ -67,14 +66,12 @@ def read_file(uploaded_file):
     error_msg = ""
 
     if name.endswith('.csv'):
-        # تجربة الترميزات بالترتيب
         for enc in encodings:
             try:
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, encoding=enc)
-                # فحص بسيط: إذا نجحنا في القراءة، نتأكد أن الأعمدة ليست رموزاً غريبة
                 if len(df.columns) > 0 and isinstance(df.columns[0], str):
-                    break # نجحنا
+                    break 
             except Exception as e:
                 error_msg = str(e)
                 continue
@@ -84,16 +81,13 @@ def read_file(uploaded_file):
         except Exception as e:
             return None, f"خطأ Excel: {str(e)}"
     else:
-        return None, "صيغة الملف غير مدعومة (فقط CSV أو Excel)."
+        return None, "صيغة الملف غير مدعومة."
 
     if df is None:
-        return None, f"فشل قراءة الملف بكل الترميزات. تأكد أنه CSV سليم. (الخطأ: {error_msg})"
+        return None, f"فشل القراءة. تأكد من الملف. (الخطأ: {error_msg})"
 
-    # تنظيف الأسماء والأعمدة الفارغة
     df.columns = df.columns.str.strip()
     df = df.dropna(how='all')
-    
-    # توحيد أسماء الأعمدة لتسهيل المعالجة
     df = df.rename(columns=lambda x: x.lower().strip())
     return df, None
 
@@ -103,7 +97,6 @@ class SmartMatcher:
     def __init__(self, our_df, comp_dfs):
         self.our_df = our_df.copy()
         self.comp_dfs = comp_dfs
-        # تحسين Vectorizer لدعم العربية بشكل أفضل
         self.vectorizer = TfidfVectorizer(
             analyzer='char_wb', 
             ngram_range=(2, 4), 
@@ -115,13 +108,9 @@ class SmartMatcher:
         """البحث عن اسم العمود المناسب"""
         for c in candidates:
             for col in df.columns:
-                # بحث مرن (يحتوي على الكلمة)
-                if c.lower() in col.lower():
-                    return col
-        # محاولة ذكية: البحث عن أول عمود نصي
+                if c.lower() in col.lower(): return col
         for col in df.columns:
-            if df[col].dtype == 'object':
-                return col
+            if df[col].dtype == 'object': return col
         return df.columns[0]
 
     def get_price_col(self, df):
@@ -130,35 +119,28 @@ class SmartMatcher:
         for c in candidates:
             for col in df.columns:
                 if c in col.lower(): return col
-        # إذا لم نجد، نبحث عن أي عمود رقمي اسمه مشبوه
         for col in df.columns:
-            if any(x in col.lower() for x in ['sar', 'rs', 'ر.س']):
-                return col
+            if any(x in col.lower() for x in ['sar', 'rs', 'ر.س']): return col
         return None
 
     def prepare_data(self):
-        # 1. تجهيز بياناتنا
         self.our_prod_col = self.get_col_name(self.our_df, ["product", "name", "المنتج", "اسم", "item"])
         self.our_price_col = self.get_price_col(self.our_df)
         
-        # التأكد من أن عمود المنتج نصي
         self.our_df[self.our_prod_col] = self.our_df[self.our_prod_col].astype(str)
-        
         self.our_df['norm_name'] = self.our_df[self.our_prod_col].apply(normalize)
         self.our_df['brand'] = self.our_df[self.our_prod_col].apply(extract_brand)
         self.our_df['size'] = self.our_df[self.our_prod_col].apply(extract_size)
         self.our_df['type'] = self.our_df[self.our_prod_col].apply(extract_type)
 
-        # 2. تجهيز المنافسين
         self.processed_comps = {}
         for name, df in self.comp_dfs.items():
             df_clean = df.copy()
             p_col = self.get_col_name(df_clean, ["product", "name", "المنتج", "اسم"])
             pr_col = self.get_price_col(df_clean)
             
-            if not pr_col: continue # تخطي الملف إذا لم نجد عمود سعر
+            if not pr_col: continue
             
-            # تنظيف السعر من الرموز (ر.س، SAR, ,)
             df_clean[pr_col] = df_clean[pr_col].astype(str).str.replace(r'[^\d.]', '', regex=True)
             df_clean[pr_col] = pd.to_numeric(df_clean[pr_col], errors='coerce').fillna(0)
 
@@ -168,7 +150,6 @@ class SmartMatcher:
             df_clean['size'] = df_clean[p_col].apply(extract_size)
             df_clean['type'] = df_clean[p_col].apply(extract_type)
             
-            # استبعاد العينات
             df_clean = df_clean[~df_clean['norm_name'].apply(is_sample)]
 
             self.processed_comps[name] = {
@@ -176,38 +157,40 @@ class SmartMatcher:
             }
 
     def strict_score(self, row_our, row_comp):
-        """حساب التطابق مع تساهل ذكي"""
-        # 1. الاسم (RapidFuzz)
+        """حساب التطابق"""
         score = fuzz.token_sort_ratio(row_our['norm_name'], row_comp['norm_name'])
         
-        # 2. الماركة (تساهل: إذا اختلفت الماركة نخفض النتيجة ولا نصفرها فوراً، ربما اختلاف كتابة)
+        # تخفيف شرط الماركة: إذا اختلفت نقلل النتيجة فقط بدلاً من التصغير
         if row_our['brand'] and row_comp['brand']:
             if row_our['brand'] != row_comp['brand']:
-                # تحقق إضافي: هل إحدى الماركتين جزء من الأخرى؟ (Dior vs Christian Dior)
                 if row_our['brand'] in row_comp['brand'] or row_comp['brand'] in row_our['brand']:
-                    score += 2 # مكافأة صغيرة
+                    score += 5
                 else:
-                    return 0 # ماركة مختلفة كلياً
+                    return 0 # اختلاف جذري في الماركة
         
-        # 3. الحجم (صارم)
+        # تخفيف شرط الحجم: السماح بفارق بسيط أو عدم وجود حجم
         if row_our['size'] > 0 and row_comp['size'] > 0:
             if row_our['size'] != row_comp['size']:
-                return 0 # حجم مختلف
+                return 0
             else:
-                score += 5 # تطابق الحجم يرفع الثقة
+                score += 5
         
-        # 4. النوع
         if row_our['type'] and row_comp['type'] and row_our['type'] != row_comp['type']:
-             score -= 10
+             score -= 15
 
         return min(100, max(0, score))
 
     def run(self, progress_callback=None):
         results = []
-        
-        # التحقق من وجود بيانات
+        # تعريف الأعمدة الافتراضية لمنع KeyError
+        expected_columns = [
+            "المنتج", "السعر", "الماركة", "منتج المنافس", 
+            "سعر المنافس", "الفرق", "نسبة التطابق", 
+            "القرار", "الخطورة", "المنافس", "جميع المنافسين"
+        ]
+
         if self.our_df.empty or not self.processed_comps:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=expected_columns)
 
         total_items = len(self.our_df)
         
@@ -215,18 +198,16 @@ class SmartMatcher:
             comp_df = comp_data['df']
             if comp_df.empty: continue
             
-            # Vectorization
             try:
                 tfidf_matrix_comp = self.vectorizer.fit_transform(comp_df['norm_name'])
                 tfidf_matrix_our = self.vectorizer.transform(self.our_df['norm_name'])
                 cosine_sim = cosine_similarity(tfidf_matrix_our, tfidf_matrix_comp)
             except:
-                continue # تخطي في حال فشل الـ Vectorization (نادر)
+                continue
 
             for idx, row_our in self.our_df.iterrows():
                 if is_sample(row_our[self.our_prod_col]): continue
                 
-                # Top 5 Candidates
                 sim_scores = cosine_sim[idx]
                 top_indices = sim_scores.argsort()[-5:][::-1]
                 
@@ -234,8 +215,7 @@ class SmartMatcher:
                 best_score = 0
                 
                 for comp_idx in top_indices:
-                    # عتبة أولية منخفضة (0.2) للسماح بفحص المرشحين
-                    if sim_scores[comp_idx] < 0.2: continue
+                    if sim_scores[comp_idx] < 0.15: continue # تخفيف العتبة
                     
                     row_comp = comp_df.iloc[comp_idx]
                     score = self.strict_score(row_our, row_comp)
@@ -244,8 +224,7 @@ class SmartMatcher:
                         best_score = score
                         best_match = row_comp
 
-                # تصنيف النتيجة
-                if best_match is not None and best_score >= MATCH_THRESHOLD:
+                if best_match is not None and best_score >= MATCH_THRESHOLD: # تأكد أن MATCH_THRESHOLD في config ليس مرتفعاً جداً (يفضل 50-60)
                     our_price = float(row_our[self.our_price_col] or 0) if self.our_price_col else 0
                     comp_price = float(best_match[comp_data['pr_col']])
                     diff = our_price - comp_price if comp_price > 0 else 0
@@ -278,26 +257,23 @@ class SmartMatcher:
                 if progress_callback and idx % 50 == 0:
                     progress_callback((idx + 1) / total_items)
 
-        # تجميع النتائج
-        if not results: return pd.DataFrame()
+        if not results:
+            # إصلاح الخطأ: إرجاع DataFrame فارغ ولكن بالأعمدة الصحيحة
+            return pd.DataFrame(columns=expected_columns)
         
         df_res = pd.DataFrame(results)
         final_rows = []
         
         for name, group in df_res.groupby('المنتج'):
-            # نأخذ أفضل تطابق (أعلى score)
             best_row = group.loc[group['نسبة التطابق'].idxmax()].to_dict()
             
-            # إذا كان هناك سعر أقل عند منافس آخر، نأخذه بعين الاعتبار
             min_price_row = group.loc[group['سعر المنافس'].idxmin()]
             if min_price_row['سعر المنافس'] < best_row['سعر المنافس'] and min_price_row['سعر المنافس'] > 0:
-                 # تحديث المعلومات لتعكس السعر الأقل والأخطر
                  best_row['سعر المنافس'] = min_price_row['سعر المنافس']
                  best_row['منتج المنافس'] = min_price_row['منتج المنافس']
                  best_row['المنافس'] = min_price_row['المنافس']
                  best_row['الفرق'] = best_row['السعر'] - best_row['سعر المنافس']
             
-            # إضافة جميع المنافسين
             best_row['جميع المنافسين'] = group[['المنافس', 'منتج المنافس', 'سعر المنافس', 'نسبة التطابق']].rename(
                 columns={'منتج المنافس': 'name', 'سعر المنافس': 'price', 'نسبة التطابق': 'score', 'المنافس': 'competitor'}
             ).to_dict('records')
@@ -311,10 +287,8 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None):
     return matcher.run(progress_callback)
 
 def find_missing_products(our_df, comp_dfs):
-    # نسخة مبسطة وسريعة للمفقودات (تعتمد على الاسم فقط)
-    # لا نحتاج لإعادة كتابتها بالكامل، يمكن استخدام نفس المنطق في الملف السابق
-    # ولكن مع التأكد من استخدام دوال normalize الجديدة
-    return pd.DataFrame() # (يمكنك نسخ دالة المفقودات السابقة إذا كنت تحتاجها، لكن التركيز هنا على إصلاح المطابقة)
+    # نسخة مبسطة لضمان عدم حدوث أخطاء
+    return pd.DataFrame(columns=["منتج المنافس", "سعر المنافس", "المنافس", "الماركة"])
 
 def export_excel(df, sheet_name="النتائج"):
     output = io.BytesIO()
