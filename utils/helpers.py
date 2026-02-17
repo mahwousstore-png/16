@@ -1,252 +1,186 @@
 """
-helpers.py - أدوات مساعدة v17.0
-- فلاتر متقدمة
-- أزرار ذكية لكل قسم
-- خاصية لصق
-- تصدير Excel
-- عمل في الخلفية
+helpers.py - أدوات مساعدة وإدارة المهام الخلفية v17.2
+- إدارة المهام (Threading) لمنع تجمد الواجهة.
+- فلاتر متقدمة تدعم هيكلية البيانات الجديدة.
+- دوال تصدير Excel محسنة.
 """
-import pandas as pd, io, threading, time
+import pandas as pd
+import io
+import threading
+import uuid
+import time
 from datetime import datetime
 
+# ===== 1. إدارة المهام في الخلفية (Background Task Manager) =====
 
-# ===== فلاتر متقدمة =====
-def apply_filters(df, filters):
-    """تطبيق فلاتر متعددة على DataFrame"""
-    result = df.copy()
-    if not filters:
-        return result
-
-    # فلتر الماركة
-    if filters.get("brand") and filters["brand"] != "الكل":
-        result = result[result.get("الماركة", pd.Series(dtype=str)).str.contains(filters["brand"], case=False, na=False)]
-
-    # فلتر المنافس
-    if filters.get("competitor") and filters["competitor"] != "الكل":
-        result = result[result.get("المنافس", pd.Series(dtype=str)).str.contains(filters["competitor"], case=False, na=False)]
-
-    # فلتر نطاق السعر
-    if filters.get("price_min") is not None:
-        result = result[result.get("السعر", pd.Series(dtype=float)) >= filters["price_min"]]
-    if filters.get("price_max") is not None:
-        result = result[result.get("السعر", pd.Series(dtype=float)) <= filters["price_max"]]
-
-    # فلتر نسبة التطابق
-    if filters.get("match_min") is not None:
-        result = result[result.get("نسبة التطابق", pd.Series(dtype=float)) >= filters["match_min"]]
-
-    # فلتر الفرق
-    if filters.get("diff_min") is not None:
-        result = result[result.get("الفرق", pd.Series(dtype=float)).abs() >= filters["diff_min"]]
-
-    # فلتر النوع
-    if filters.get("type") and filters["type"] != "الكل":
-        result = result[result.get("النوع", pd.Series(dtype=str)).str.contains(filters["type"], case=False, na=False)]
-
-    # فلتر الحجم
-    if filters.get("size") and filters["size"] != "الكل":
-        result = result[result.get("الحجم", pd.Series(dtype=str)).str.contains(filters["size"], case=False, na=False)]
-
-    # فلتر القرار
-    if filters.get("decision") and filters["decision"] != "الكل":
-        result = result[result.get("القرار", pd.Series(dtype=str)).str.contains(filters["decision"], case=False, na=False)]
-
-    # بحث نصي
-    if filters.get("search"):
-        search = filters["search"].lower()
-        mask = result.apply(lambda row: any(search in str(v).lower() for v in row.values), axis=1)
-        result = result[mask]
-
-    return result
-
-
-def get_filter_options(df):
-    """استخراج خيارات الفلاتر من البيانات"""
-    options = {"brands": ["الكل"], "competitors": ["الكل"], "types": ["الكل"], "sizes": ["الكل"], "decisions": ["الكل"]}
-
-    if "الماركة" in df.columns:
-        brands = df["الماركة"].dropna().unique().tolist()
-        options["brands"].extend(sorted(set(b for b in brands if b)))
-
-    if "المنافس" in df.columns:
-        comps = df["المنافس"].dropna().unique().tolist()
-        options["competitors"].extend(sorted(set(c for c in comps if c)))
-
-    if "النوع" in df.columns:
-        types = df["النوع"].dropna().unique().tolist()
-        options["types"].extend(sorted(set(t for t in types if t)))
-
-    if "الحجم" in df.columns:
-        sizes = df["الحجم"].dropna().unique().tolist()
-        options["sizes"].extend(sorted(set(s for s in sizes if s)))
-
-    if "القرار" in df.columns:
-        decisions = df["القرار"].dropna().unique().tolist()
-        options["decisions"].extend(sorted(set(d for d in decisions if d)))
-
-    return options
-
-
-# ===== تصدير Excel =====
-def export_to_excel(df, sheet_name="البيانات"):
-    """تصدير DataFrame إلى Excel"""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-    output.seek(0)
-    return output
-
-
-def export_multiple_sheets(data_dict):
-    """تصدير عدة أوراق في ملف Excel واحد"""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for name, df in data_dict.items():
-            if not df.empty:
-                df.to_excel(writer, sheet_name=name[:31], index=False)
-    output.seek(0)
-    return output
-
-
-# ===== عمل في الخلفية =====
-class BackgroundTask:
-    """إدارة المهام في الخلفية"""
+class TaskManager:
+    """يدير العمليات الطويلة في خيوط منفصلة (Threads)"""
     _tasks = {}
 
     @classmethod
-    def start(cls, task_id, func, *args, **kwargs):
-        """بدء مهمة في الخلفية"""
+    def start_task(cls, func, *args, **kwargs):
+        """بدء مهمة جديدة وإرجاع معرفها (ID)"""
+        task_id = str(uuid.uuid4())
         cls._tasks[task_id] = {
-            "status": "running",
-            "progress": 0,
-            "result": None,
-            "error": None,
-            "started": datetime.now().strftime("%H:%M:%S")
+            'status': 'running',
+            'progress': 0,
+            'result': None,
+            'error': None,
+            'start_time': datetime.now(),
+            'message': 'جاري البدء...'
         }
-
-        def wrapper():
+        
+        def task_wrapper():
             try:
-                result = func(*args, **kwargs)
-                cls._tasks[task_id]["result"] = result
-                cls._tasks[task_id]["status"] = "done"
-                cls._tasks[task_id]["progress"] = 100
-            except Exception as e:
-                cls._tasks[task_id]["error"] = str(e)
-                cls._tasks[task_id]["status"] = "error"
+                # دالة تحديث التقدم التي سيستخدمها المحرك
+                def update_progress(p, msg=""):
+                    cls._tasks[task_id]['progress'] = int(p * 100)
+                    if msg: cls._tasks[task_id]['message'] = msg
 
-        thread = threading.Thread(target=wrapper, daemon=True)
+                # استدعاء الدالة الأصلية (المحرك) مع تمرير دالة التقدم
+                # نفترض أن الدالة المستقبلة تقبل معامل progress_callback
+                result = func(*args, progress_callback=update_progress, **kwargs)
+                
+                cls._tasks[task_id]['result'] = result
+                cls._tasks[task_id]['status'] = 'completed'
+                cls._tasks[task_id]['progress'] = 100
+                cls._tasks[task_id]['message'] = 'تم الانتهاء بنجاح'
+            except Exception as e:
+                cls._tasks[task_id]['error'] = str(e)
+                cls._tasks[task_id]['status'] = 'failed'
+                cls._tasks[task_id]['message'] = f"خطأ: {str(e)}"
+        
+        # تشغيل في Thread منفصل
+        thread = threading.Thread(target=task_wrapper, daemon=True)
         thread.start()
         return task_id
 
     @classmethod
     def get_status(cls, task_id):
-        return cls._tasks.get(task_id, {"status": "not_found"})
+        """جلب حالة المهمة الحالية"""
+        return cls._tasks.get(task_id, {'status': 'not_found'})
 
     @classmethod
-    def update_progress(cls, task_id, progress):
+    def clear_task(cls, task_id):
+        """تنظيف الذاكرة بعد الانتهاء"""
         if task_id in cls._tasks:
-            cls._tasks[task_id]["progress"] = progress
+            del cls._tasks[task_id]
 
-    @classmethod
-    def get_result(cls, task_id):
-        task = cls._tasks.get(task_id)
-        if task and task["status"] == "done":
-            return task["result"]
-        return None
+# ===== 2. الفلاتر المتقدمة =====
 
+def apply_filters(df, filters):
+    """تطبيق فلاتر متعددة على DataFrame"""
+    if df is None or df.empty: return df
+    
+    result = df.copy()
+    
+    # 1. فلتر البحث النصي (شامل)
+    if filters.get("search"):
+        search_term = filters["search"].lower()
+        # دمج كل الأعمدة النصية للبحث فيها
+        mask = result.astype(str).apply(
+            lambda x: x.str.lower().str.contains(search_term, na=False)
+        ).any(axis=1)
+        result = result[mask]
 
-# ===== لصق ومعالجة =====
-def parse_pasted_text(text):
-    """تحليل نص ملصوق وتحويله إلى بيانات"""
-    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
-    if not lines:
-        return None, "لا يوجد محتوى"
+    # 2. فلتر الماركة
+    if filters.get("brand") and filters["brand"] != "الكل":
+        result = result[result["الماركة"] == filters["brand"]]
 
-    # محاولة تحليل كـ CSV/TSV
-    if '\t' in lines[0] or ',' in lines[0]:
-        sep = '\t' if '\t' in lines[0] else ','
-        try:
-            df = pd.read_csv(io.StringIO(text), sep=sep)
-            return df, f"تم تحليل {len(df)} صف"
-        except:
-            pass
+    # 3. فلتر المنافس
+    if filters.get("competitor") and filters["competitor"] != "الكل":
+        result = result[result["المنافس"] == filters["competitor"]]
 
-    # محاولة تحليل كقائمة
-    products = []
-    for line in lines:
-        products.append({"المنتج": line})
-    return pd.DataFrame(products), f"تم تحليل {len(products)} عنصر"
+    # 4. فلتر فرق السعر (المدى)
+    if filters.get("diff_min") is not None:
+        result = result[result["الفرق"].abs() >= filters["diff_min"]]
 
+    # 5. فلتر نسبة التطابق
+    if filters.get("match_min") is not None:
+        result = result[result["نسبة التطابق"] >= filters["match_min"]]
+        
+    # 6. فلتر السعر (Range)
+    if filters.get("price_min") is not None:
+        result = result[result["السعر"] >= filters["price_min"]]
+    if filters.get("price_max") is not None and filters["price_max"] > 0:
+        result = result[result["السعر"] <= filters["price_max"]]
 
-def process_ai_commands(text, products_df=None):
-    """معالجة أوامر AI على البيانات"""
-    commands = {
-        "حذف": "remove",
-        "إزالة": "remove",
-        "ازالة": "remove",
-        "نقل": "move",
-        "تأجيل": "defer",
-        "تاجيل": "defer",
-        "موافقة": "approve",
-        "رفض": "reject"
+    return result
+
+def get_filter_options(df):
+    """استخراج خيارات القوائم المنسدلة من البيانات"""
+    options = {
+        "brands": ["الكل"],
+        "competitors": ["الكل"],
+        "types": ["الكل"]
     }
+    
+    if df is None or df.empty: return options
 
-    detected = []
-    for keyword, action in commands.items():
-        if keyword in text:
-            detected.append(action)
+    if "الماركة" in df.columns:
+        brands = sorted(df["الماركة"].dropna().unique().astype(str).tolist())
+        options["brands"].extend([b for b in brands if b])
 
-    return detected if detected else ["analyze"]
+    if "المنافس" in df.columns:
+        comps = sorted(df["المنافس"].dropna().unique().astype(str).tolist())
+        options["competitors"].extend([c for c in comps if c])
+        
+    if "النوع" in df.columns:
+        types = sorted(df["النوع"].dropna().unique().astype(str).tolist())
+        options["types"].extend([t for t in types if t])
 
+    return options
 
-# ===== أدوات مساعدة =====
-def format_price(price):
-    """تنسيق السعر"""
+# ===== 3. أدوات التنسيق والتصدير =====
+
+def format_price(val):
+    try: return f"{float(val):,.2f}"
+    except: return "0.00"
+
+def format_diff(val):
     try:
-        return f"{float(price):,.2f}"
-    except:
-        return "0.00"
-
-
-def format_diff(diff):
-    """تنسيق الفرق مع لون"""
-    try:
-        d = float(diff)
-        if d > 0:
-            return f"🔴 +{d:,.2f}"
-        elif d < 0:
-            return f"🟢 {d:,.2f}"
+        v = float(val)
+        if v > 0: return f"🔴 +{v:,.2f}" # أغلى من المنافس
+        if v < 0: return f"🟢 {v:,.2f}"  # أرخص من المنافس
         return "⚪ 0.00"
-    except:
-        return "0.00"
+    except: return "0.00"
 
+def export_to_excel(df, sheet_name="Sheet1"):
+    """تصدير سريع لملف Excel"""
+    output = io.BytesIO()
+    # إزالة الأعمدة التقنية قبل التصدير
+    export_df = df.copy()
+    cols_to_drop = ['norm_name', 'vector_id', 'جميع المنافسين']
+    export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns], errors='ignore')
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        export_df.to_excel(writer, sheet_name=sheet_name[:30], index=False) # Excel limit 31 chars
+    output.seek(0)
+    return output
 
-def get_color_for_diff(diff):
-    """الحصول على لون بناءً على الفرق"""
+def export_multiple_sheets(data_dict):
+    """تصدير عدة شيتات في ملف واحد"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for name, df in data_dict.items():
+            if df is not None and not df.empty:
+                # تنظيف
+                export_df = df.copy()
+                cols_to_drop = ['norm_name', ' جميع المنافسين']
+                export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns], errors='ignore')
+                export_df.to_excel(writer, sheet_name=name[:30], index=False)
+    output.seek(0)
+    return output
+
+# ===== 4. معالجة النصوص الملصوقة (Paste) =====
+def parse_pasted_text(text):
+    """تحويل النص المنسوخ من Excel/Sheets إلى DataFrame"""
     try:
-        d = float(diff)
-        if d > 10:
-            return "#ff4444"
-        elif d > 0:
-            return "#ff8800"
-        elif d < -10:
-            return "#00cc00"
-        elif d < 0:
-            return "#44aa44"
-        return "#888888"
-    except:
-        return "#888888"
-
-
-def safe_float(val, default=0.0):
-    """تحويل آمن إلى float"""
-    try:
-        return float(val)
-    except:
-        return default
-
-
-def log_event(event_type, details=""):
-    """تسجيل حدث مع الوقت"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return {"time": timestamp, "type": event_type, "details": details}
+        # محاولة قراءة كـ Tab-separated (Excel default copy)
+        df = pd.read_csv(io.StringIO(text), sep='\t')
+        if len(df.columns) < 2:
+            # محاولة قراءة كـ CSV عادي
+            df = pd.read_csv(io.StringIO(text), sep=',')
+        return df, f"تم استيراد {len(df)} صف بنجاح"
+    except Exception as e:
+        return None, f"فشل تحليل النص: {str(e)}"
