@@ -1,294 +1,175 @@
 """
-engine.py - المحرك المتجهي السريع v17.2 (Vectorized Engine)
-- يعتمد على TF-IDF & Cosine Similarity لسرعة تصل إلى 50x
-- فلترة صارمة للماركة والحجم لتقليل الأخطاء
-- متوافق تماماً مع app.py v17.2
+ai_engine.py - محرك الذكاء الصناعي v17.4 (Perfume Expert Edition)
+- تحسين البرومبت ليكون خبيراً في فك طلاسم أسماء العطور
+- القدرة على التمييز بين التركيزات (EDP/EDT) والأحجام
+- مخرجات JSON دقيقة لدمجها في النظام
 """
+import requests
+import json
+import time
 import re
-import pandas as pd
-import numpy as np
-import io
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from config import GEMINI_API_KEYS, OPENROUTER_API_KEY
 
-# استيراد الإعدادات (تأكد من تطابق الأسماء مع config.py)
-try:
-    from config import (
-        REJECT_KEYWORDS, KNOWN_BRANDS, WORD_REPLACEMENTS,
-        MATCH_THRESHOLD, HIGH_CONFIDENCE, REVIEW_THRESHOLD,
-        PRICE_TOLERANCE, TESTER_KEYWORDS, SET_KEYWORDS
-    )
-except ImportError:
-    # قيم افتراضية للطوارئ
-    MATCH_THRESHOLD = 60
-    HIGH_CONFIDENCE = 90
-    PRICE_TOLERANCE = 5
-    REJECT_KEYWORDS = ["sample", "عينة"]
-    KNOWN_BRANDS = []
-    WORD_REPLACEMENTS = {}
+# ===== إعدادات النماذج =====
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "google/gemini-2.0-flash-001"
 
-# ===== 1. دوال القراءة والمعالجة (Helpers) =====
+# ===== الشخصية (System Prompt) =====
+PERFUME_EXPERT_PROMPT = """
+أنت خبير بيانات ومتخصص في العطور العالمية. مهمتك هي المطابقة الدقيقة بين المنتجات.
+قواعد المطابقة الصارمة:
+1. الماركة (Brand): يجب أن تكون متطابقة تماماً.
+2. العطر (Line): "Sauvage" يختلف عن "Sauvage Elixir".
+3. التركيز (Concentration): الـ EDP يختلف عن EDT يختلف عن Parfum. (إلا إذا طُلب تجاهل ذلك).
+4. الحجم (Size): 100ml يختلف عن 50ml. (تسامح بسيط 3.3oz = 100ml).
+5. النوع (Tester): التستر هو نفس العطر ولكن بسعر أرخص (طابقهم ولكن نبهني).
 
-def read_file(uploaded_file):
-    """قراءة ملف CSV أو Excel بمرونة عالية"""
-    try:
-        name = uploaded_file.name.lower()
-        if name.endswith('.csv'):
-            try:
-                df = pd.read_csv(uploaded_file, encoding='utf-8')
-            except:
-                uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-        elif name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(uploaded_file)
-        else:
-            return None, "صيغة الملف غير مدعومة"
-        
-        # تنظيف أسماء الأعمدة (إزالة المسافات الزائدة)
-        df.columns = df.columns.str.strip()
-        df = df.dropna(how='all')
-        return df, None
-    except Exception as e:
-        return None, f"خطأ القراءة: {str(e)}"
+أجب دائماً بصيغة JSON فقط.
+"""
 
-def normalize(text):
-    """توحيد النصوص (عربي/إنجليزي) للمطابقة"""
-    if not isinstance(text, str): return ""
-    t = text.strip().lower()
-    # استبدال الكلمات الشائعة (مثل EDP -> eau de parfum)
-    for ar, en in WORD_REPLACEMENTS.items():
-        t = t.replace(ar.lower(), en)
-    # تنظيف الرموز وتوحيد العربية
-    t = re.sub("[إأآا]", "ا", t)
-    t = re.sub("ة", "ه", t)
-    t = re.sub("ى", "ي", t)
-    t = re.sub(r'[^\w\s.]', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
-
-def extract_size(text):
-    """استخراج الحجم (ml)"""
-    if not isinstance(text, str): return 0
-    m = re.findall(r'(\d+(?:\.\d+)?)\s*(?:ml|مل|ملي|g|غ)', text.lower())
-    return float(m[0]) if m else 0
-
-def extract_brand(text):
-    """استخراج الماركة بناءً على القائمة المعروفة"""
-    if not isinstance(text, str): return ""
-    tl = text.lower()
-    for b in KNOWN_BRANDS:
-        if b.lower() in tl:
-            return b
-    # إذا لم توجد في القائمة، خذ الكلمة الأولى كاجتهاد
-    return text.split()[0] if text else ""
-
-def extract_type(text):
-    """استخراج نوع العطر"""
-    if not isinstance(text, str): return ""
-    tl = text.lower()
-    if any(k in tl for k in ['edp', 'eau de parfum', 'بارفيوم', 'parfum']): return 'EDP'
-    if any(k in tl for k in ['edt', 'eau de toilette', 'تواليت']): return 'EDT'
-    if any(k in tl for k in ['cologne', 'كولون', 'edc']): return 'EDC'
-    if any(k in tl for k in ['oil', 'زيت']): return 'Oil'
-    return ''
-
-def is_sample(text):
-    if not isinstance(text, str): return False
-    tl = text.lower()
-    return any(k in tl for k in REJECT_KEYWORDS)
-
-# ===== 2. المحرك المتجهي (The Vectorized Engine) =====
-
-def run_full_analysis(our_df, comp_dfs, progress_callback=None):
-    """
-    تحليل كامل باستخدام المصفوفات (Vectorization).
-    الأسرع والأدق للبيانات الضخمة.
-    """
-    results = []
+def _call_gemini(prompt, system_prompt=""):
+    """الاتصال بـ Gemini مع التدوير بين المفاتيح"""
+    full_prompt = f"{system_prompt}\n\n{prompt}"
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
+    }
     
-    # تحديد أعمدتنا
-    our_col = next((c for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"] if c in our_df.columns), our_df.columns[0])
-    our_price_col = next((c for c in ["السعر", "سعر", "Price", "price", "Cost"] if c in our_df.columns), None)
-
-    # تجهيز بياناتنا (مرة واحدة)
-    our_data = our_df.copy()
-    # تنظيف واستخراج الخصائص
-    our_data['normalized'] = our_data[our_col].apply(normalize)
-    our_data['brand'] = our_data[our_col].apply(extract_brand)
-    our_data['size'] = our_data[our_col].apply(extract_size)
-    
-    # استبعاد العينات من المقارنة
-    our_data = our_data[~our_data[our_col].apply(is_sample)]
-
-    # إعداد المحرك (TF-IDF)
-    # نستخدم char_wb (حروف مع حدود كلمات) لمرونة أكبر في الأكواد والأسماء
-    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5), min_df=1)
-    
-    # تدريب النموذج على بياناتنا
-    try:
-        our_vectors = vectorizer.fit_transform(our_data['normalized'].fillna(""))
-    except ValueError:
-        return pd.DataFrame() # بيانات فارغة
-
-    total_steps = len(comp_dfs)
-    
-    for idx, (comp_name, comp_df) in enumerate(comp_dfs.items()):
-        # تحديث شريط التقدم في app.py
-        if progress_callback: progress_callback((idx) / total_steps)
-        
-        # تحديد أعمدة المنافس
-        comp_prod_col = next((c for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"] if c in comp_df.columns), comp_df.columns[0])
-        comp_price_col = next((c for c in ["السعر", "سعر", "Price", "price"] if c in comp_df.columns), None)
-
-        # تجهيز بيانات المنافس
-        comp_data = comp_df.copy()
-        comp_data = comp_data[~comp_data[comp_prod_col].apply(is_sample)] # استبعاد عينات المنافس
-        comp_data['normalized'] = comp_data[comp_prod_col].apply(normalize)
-        comp_data['brand'] = comp_data[comp_prod_col].apply(extract_brand)
-        comp_data['size'] = comp_data[comp_prod_col].apply(extract_size)
-
-        if comp_data.empty: continue
-
-        # تحويل بيانات المنافس لمصفوفة
+    for key in GEMINI_API_KEYS:
+        if not key: continue
         try:
-            comp_vectors = vectorizer.transform(comp_data['normalized'].fillna(""))
-        except: continue
+            url = f"{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={key}"
+            resp = requests.post(url, json=payload, timeout=20)
+            if resp.status_code == 200:
+                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except:
+            continue
+    return None
 
-        # === المضرب السحري: حساب التشابه (الكل مقابل الكل) ===
-        # النتيجة مصفوفة ضخمة: [عدد منتجاتنا] × [عدد منتجات المنافس]
-        similarity_matrix = cosine_similarity(our_vectors, comp_vectors)
+def _call_openrouter(prompt, system_prompt=""):
+    """الاتصال بـ OpenRouter كاحتياطي"""
+    if not OPENROUTER_API_KEY: return None
+    try:
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        payload = {
+            "model": OPENROUTER_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        resp = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"]
+    except:
+        return None
 
-        # استخراج النتائج
-        for i, (our_idx, our_row) in enumerate(our_data.iterrows()):
-            
-            # صف التشابهات لهذا المنتج
-            sim_scores = similarity_matrix[i]
-            
-            # --- فلترة ذكية (Post-Processing Filters) ---
-            
-            # 1. فلتر الماركة (Brand Lock)
-            # إذا اختلفت الماركة، اجعل السكور صفر فوراً
-            if our_row['brand']:
-                brand_mask = comp_data['brand'].str.lower() != our_row['brand'].lower()
-                sim_scores[brand_mask.values] = 0
-
-            # 2. فلتر الحجم (Size Lock)
-            # نسمح باختلاف بسيط (مثلاً 5 مل)
-            if our_row['size'] > 0:
-                size_diff = np.abs(comp_data['size'].values - our_row['size'])
-                size_mask = size_diff > 5 # اختلاف أكثر من 5 مل
-                sim_scores[size_mask] *= 0.5 # عقاب قوي للاختلاف
-
-            # العثور على أفضل تطابق بعد الفلترة
-            best_match_idx = sim_scores.argmax()
-            best_score = sim_scores[best_match_idx] * 100
-
-            if best_score >= MATCH_THRESHOLD:
-                comp_row = comp_data.iloc[best_match_idx]
-                
-                # استخراج الأسعار
-                our_p = float(our_row[our_price_col]) if our_price_col else 0
-                comp_p = float(comp_row[comp_price_col]) if comp_price_col else 0
-                
-                # تجاهل الأسعار الصفرية
-                if our_p <= 1 or comp_p <= 1: continue
-
-                diff = our_p - comp_p
-                
-                # منطق القرار
-                decision = "✅ موافق"
-                risk = "منخفض"
-                
-                if diff > PRICE_TOLERANCE:
-                    decision = "🔴 سعر أعلى"
-                    risk = "عالي"
-                elif diff < -PRICE_TOLERANCE:
-                    decision = "🟢 سعر أقل"
-                
-                if best_score < HIGH_CONFIDENCE:
-                    decision = "⚠️ مراجعة"
-                    risk = "متوسط"
-
-                results.append({
-                    "المنتج": our_row[our_col],
-                    "السعر": our_p,
-                    "الماركة": our_row['brand'],
-                    "الحجم": f"{int(our_row['size'])}ml" if our_row['size'] else "",
-                    "النوع": extract_type(our_row[our_col]),
-                    "منتج المنافس": comp_row[comp_prod_col],
-                    "سعر المنافس": comp_p,
-                    "الفرق": round(diff, 2),
-                    "نسبة التطابق": round(best_score, 1),
-                    "القرار": decision,
-                    "الخطورة": risk,
-                    "المنافس": comp_name,
-                    # حقول للتوافق مع التصدير
-                    "جميع المنافسين": [] 
-                })
-
-    if progress_callback: progress_callback(1.0)
-    return pd.DataFrame(results)
-
-
-def find_missing_products(our_df, comp_dfs):
-    """
-    نسخة سريعة جداً لإيجاد المفقودات باستخدام الـ Sets (Hashing)
-    بدلاً من تكرار الحلقات البطيئة
-    """
-    missing = []
+def call_ai_json(prompt, system_prompt=PERFUME_EXPERT_PROMPT):
+    """دالة موحدة تعيد JSON دائماً"""
+    # محاولة 1: Gemini
+    res = _call_gemini(prompt, system_prompt)
+    if not res:
+        # محاولة 2: OpenRouter
+        res = _call_openrouter(prompt, system_prompt)
     
-    # 1. تجهيز قائمة منتجاتنا كـ "بصمات" (Hash Set)
-    our_col = next((c for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"] if c in our_df.columns), our_df.columns[0])
-    # نستخدم التطبيع الدقيق لإنشاء البصمة
-    our_fingerprints = set(our_df[our_col].astype(str).apply(normalize).tolist())
+    if res:
+        try:
+            # تنظيف الرد لضمان أنه JSON نقي
+            cleaned = res.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except:
+            return None
+    return None
+
+# ===== دوال التطبيق =====
+
+def verify_match_smart(our_name, comp_name, our_price, comp_price):
+    """
+    التحقق الذكي لمنتج واحد (للحالات المشكوك فيها)
+    """
+    prompt = f"""
+    قارن بين هذين المنتجين:
+    1. منتجنا: "{our_name}" (السعر: {our_price})
+    2. المنافس: "{comp_name}" (السعر: {comp_price})
+
+    هل هما نفس المنتج تماماً؟
+    أجب بـ JSON:
+    {{
+        "match": true/false,
+        "confidence": 0-100,
+        "issue": "لا يوجد/اختلاف حجم/اختلاف تركيز/اختلاف عطر",
+        "action": "موافق/مراجعة/رفض"
+    }}
+    """
+    res = call_ai_json(prompt)
+    if res:
+        return {"success": True, **res}
+    return {"success": False, "match": False, "confidence": 0, "issue": "فشل الاتصال"}
+
+def bulk_resolve_reviews(items_list):
+    """
+    معالجة قائمة المراجعة دفعة واحدة (للسرعة)
+    يستقبل قائمة: [{"id": 1, "our": "...", "comp": "..."}]
+    """
+    if not items_list: return []
     
-    for comp_name, comp_df in comp_dfs.items():
-        comp_prod_col = next((c for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"] if c in comp_df.columns), comp_df.columns[0])
-        comp_price_col = next((c for c in ["السعر", "سعر", "Price", "price"] if c in comp_df.columns), None)
+    # تحويل القائمة لنص
+    items_text = ""
+    for item in items_list:
+        items_text += f"- ID {item['id']}: Our='{item['our']}' VS Comp='{item['comp']}'\n"
         
-        for _, row in comp_df.iterrows():
-            p_name = str(row[comp_prod_col])
-            if is_sample(p_name): continue
-            
-            p_fingerprint = normalize(p_name)
-            
-            # بحث فوري (O(1) complexity)
-            if p_fingerprint not in our_fingerprints:
-                # تحقق إضافي: هل الاسم قصير جداً ليكون مفيداً؟
-                if len(p_fingerprint) < 4: continue
-                
-                price = 0
-                if comp_price_col:
-                    try: price = float(row[comp_price_col])
-                    except: pass
-                
-                missing.append({
-                    "منتج المنافس": p_name,
-                    "سعر المنافس": price,
-                    "المنافس": comp_name,
-                    "الماركة": extract_brand(p_name),
-                    "النوع": extract_type(p_name),
-                    "الحجم": extract_size(p_name)
-                })
-
-    return pd.DataFrame(missing)
-
-
-# ===== دوال التصدير (مطلوبة لـ app.py) =====
-def export_excel(df, sheet_name="النتائج"):
-    output = io.BytesIO()
-    export_df = df.copy()
-    if "جميع المنافسين" in export_df.columns:
-        export_df = export_df.drop(columns=["جميع المنافسين"])
-    # تصحيح ترتيب الأعمدة للأناقة
-    cols_order = ["المنتج", "السعر", "منتج المنافس", "سعر المنافس", "الفرق", "نسبة التطابق", "القرار", "المنافس", "الماركة"]
-    available_cols = [c for c in cols_order if c in export_df.columns]
-    remaining_cols = [c for c in export_df.columns if c not in cols_order]
-    export_df = export_df[available_cols + remaining_cols]
+    prompt = f"""
+    لديك قائمة أزواج من المنتجات. حدد هل كل زوج متطابق أم لا.
+    تذكر: تجاهل الفروقات البسيطة في الكتابة، ركز على الجوهر (الماركة، العطر، الحجم، التركيز).
     
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        export_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-    return output.getvalue()
+    القائمة:
+    {items_text}
+    
+    أعد JSON قائمة بالنتائج:
+    [
+        {{"id": 1, "match": true, "reason": "..."}},
+        {{"id": 2, "match": false, "reason": "Different size"}}
+    ]
+    """
+    
+    res = call_ai_json(prompt)
+    return res if isinstance(res, list) else []
 
-def export_section_excel(df, section_name):
-    return export_excel(df, sheet_name=section_name[:31])
+def find_semantic_match(missing_product, candidates_list):
+    """
+    البحث عن منتج مفقود بين قائمة مرشحين (للمنتجات التي فشل البحث العادي في إيجادها)
+    """
+    candidates_text = "\n".join([f"- {c}" for c in candidates_list])
+    prompt = f"""
+    لدي منتج مفقود: "{missing_product}"
+    وهذه قائمة منتجات عند المنافس:
+    {candidates_text}
+    
+    هل يوجد أي منتج في القائمة هو نفسه المنتج المفقود (حتى لو اختلف الاسم قليلاً)؟
+    
+    أجب بـ JSON:
+    {{
+        "found": true/false,
+        "matched_name": "اسم المنتج من القائمة أو فارغ",
+        "confidence": 0-100
+    }}
+    """
+    return call_ai_json(prompt)
+
+# دوال التوافق مع الكود القديم
+def chat_with_ai(msg, hist):
+    return {"success": True, "response": "ميزة الدردشة قيد التحديث لتعمل مع المحرك الجديد."}
+
+def verify_match(p1, p2, pr1=0, pr2=0):
+    return verify_match_smart(p1, p2, pr1, pr2)
+
+def analyze_product(p, pr):
+    return {"success": False, "response": "غير مفعل"}
+
+def suggest_price(p): return 0
+def bulk_verify(items, page): return {"success": False, "response": "استخدم الدالة الجديدة"}
+def process_paste(txt, page): return {"success": False}
+def check_duplicate(n, l): return {"success": False}
