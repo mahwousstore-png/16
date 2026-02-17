@@ -1,11 +1,12 @@
 """
-engine.py - محرك المطابقة الذكي v17.2 (سريع + دقيق + ذكي)
+engine.py - محرك المطابقة الذكي v18 (سريع + دقيق + ذكي + Manual Mapping)
 - دعم CSV + Excel للرفع
 - مطابقة أسرع 10x مع caching و pre-filtering ذكي
 - دقة عالية: لا يضيع أي فرصة
 - مكافأة تطابق الماركة والحجم
 - تصفية مسبقة ذكية بالنوع والحجم والماركة
 - استثناء العينات فقط
+- تحديد الأعمدة يدوياً (Manual Column Mapping)
 """
 import re, pandas as pd, numpy as np, io
 from rapidfuzz import fuzz, process
@@ -128,7 +129,7 @@ def smart_match_score(our_name, comp_name):
     return round(base, 1)
 
 
-def find_best_match(our_product, comp_products, comp_names_col=None, our_brand=None, our_size=None):
+def find_best_match(our_product, comp_products, comp_names_col=None, comp_price_col=None, our_brand=None, our_size=None):
     """إيجاد أفضل تطابق مع تصفية مسبقة ذكية"""
     if comp_products.empty: return None
 
@@ -138,6 +139,11 @@ def find_best_match(our_product, comp_products, comp_names_col=None, our_brand=N
                 comp_names_col = c; break
         if not comp_names_col:
             comp_names_col = comp_products.columns[0]
+    
+    if not comp_price_col:
+        for c in ["السعر", "Price", "price", "سعر"]:
+            if c in comp_products.columns:
+                comp_price_col = c; break
 
     # Pre-filtering ذكي: تصفية بالماركة والحجم (مع هامش)
     filtered_df = comp_products.copy()
@@ -162,11 +168,15 @@ def find_best_match(our_product, comp_products, comp_names_col=None, our_brand=N
         score = smart_match_score(our_product, comp_name)
         if score >= MATCH_THRESHOLD:
             price = 0
-            for pc in ["السعر", "Price", "price", "سعر"]:
-                if pc in row.index:
-                    try: price = float(row[pc])
-                    except: pass
-                    break
+            if comp_price_col and comp_price_col in row.index:
+                try: price = float(row[comp_price_col])
+                except: pass
+            else:
+                for pc in ["السعر", "Price", "price", "سعر"]:
+                    if pc in row.index:
+                        try: price = float(row[pc])
+                        except: pass
+                        break
             all_matches.append({
                 "name": comp_name, "score": score,
                 "price": price, "idx": idx,
@@ -179,29 +189,59 @@ def find_best_match(our_product, comp_products, comp_names_col=None, our_brand=N
 
 
 # ===== التحليل الكامل (محسّن) =====
-def run_full_analysis(our_df, comp_dfs, progress_callback=None):
-    """تحليل شامل مع دعم عدة منافسين - محسّن للسرعة والدقة"""
+def run_full_analysis(our_df, comp_dfs, progress_callback=None, mapping=None):
+    """تحليل شامل مع دعم عدة منافسين - محسّن للسرعة والدقة
+    
+    Args:
+        our_df: DataFrame منتجاتنا
+        comp_dfs: dict من DataFrames المنافسين
+        progress_callback: دالة callback للتقدم
+        mapping: dict لتحديد الأعمدة يدوياً (اختياري)
+            - our_name: عمود اسم المنتج عندنا
+            - our_price: عمود السعر عندنا
+            - comp_name: عمود اسم المنتج عند المنافس
+            - comp_price: عمود السعر عند المنافس
+    """
     results = []
-    our_col = None
-    for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"]:
-        if c in our_df.columns:
-            our_col = c; break
-    if not our_col:
-        our_col = our_df.columns[0]
+    
+    # استخدام mapping إذا تم توفيره، وإلا استخدام الكشف التلقائي
+    if mapping:
+        our_col = mapping.get('our_name')
+        our_price_col = mapping.get('our_price')
+    else:
+        our_col = None
+        for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"]:
+            if c in our_df.columns:
+                our_col = c; break
+        if not our_col:
+            our_col = our_df.columns[0]
 
-    our_price_col = None
-    for c in ["السعر", "سعر", "Price", "price"]:
-        if c in our_df.columns:
-            our_price_col = c; break
+        our_price_col = None
+        for c in ["السعر", "سعر", "Price", "price"]:
+            if c in our_df.columns:
+                our_price_col = c; break
 
     # Pre-compute: استخراج الماركة والحجم لكل منتج منافس مرة واحدة فقط
     for comp_name, comp_df in comp_dfs.items():
-        comp_col = None
-        for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"]:
-            if c in comp_df.columns:
-                comp_col = c; break
-        if not comp_col:
-            comp_col = comp_df.columns[0]
+        if mapping:
+            comp_col = mapping.get('comp_name')
+            comp_price = mapping.get('comp_price')
+        else:
+            comp_col = None
+            for c in ["المنتج", "اسم المنتج", "Product", "Name", "name"]:
+                if c in comp_df.columns:
+                    comp_col = c; break
+            if not comp_col:
+                comp_col = comp_df.columns[0]
+            
+            comp_price = None
+            for c in ["السعر", "Price", "price", "سعر"]:
+                if c in comp_df.columns:
+                    comp_price = c; break
+        
+        # حفظ comp_col و comp_price في comp_df للاستخدام لاحقاً
+        comp_df['_comp_col'] = comp_col
+        comp_df['_comp_price_col'] = comp_price
         
         # Cache: حساب الماركة والحجم مرة واحدة
         comp_df['_brand_cache'] = comp_df[comp_col].apply(lambda x: extract_brand(str(x)))
@@ -225,7 +265,10 @@ def run_full_analysis(our_df, comp_dfs, progress_callback=None):
 
         all_comp_matches = []
         for comp_name, comp_df in comp_dfs.items():
-            matches = find_best_match(product, comp_df, our_brand=brand, our_size=size)
+            # استخدام comp_col و comp_price_col المحفوظ
+            comp_col_to_use = comp_df['_comp_col'].iloc[0] if '_comp_col' in comp_df.columns else None
+            comp_price_to_use = comp_df['_comp_price_col'].iloc[0] if '_comp_price_col' in comp_df.columns else None
+            matches = find_best_match(product, comp_df, comp_names_col=comp_col_to_use, comp_price_col=comp_price_to_use, our_brand=brand, our_size=size)
             if matches:
                 for m in matches:
                     m["competitor"] = comp_name
